@@ -1,8 +1,12 @@
-const express = require("express");
-const { EdgeTTS } = require("@andresaya/edge-tts");
-const fs = require("fs");
-const path = require("path");
-const SubMaker = require("./SubMaker");
+import express from "express";
+import { EdgeTTS } from "@andresaya/edge-tts";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import SubMaker from "./SubMaker.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const port = 3000;

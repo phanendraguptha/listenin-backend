@@ -49,4 +49,4 @@ class SubMaker {
   }
 }
 
-module.exports = SubMaker;
+export default SubMaker;

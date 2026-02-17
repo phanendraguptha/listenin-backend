@@ -4,6 +4,9 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import SubMaker from "./SubMaker.js";
+import { Readability } from "@mozilla/readability";
+import { JSDOM } from "jsdom";
+import axios from "axios";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,6 +16,28 @@ const port = 3000;
 
 // Middleware to parse JSON bodies
 app.use(express.json());
+
+app.post("/generate-dom", async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) {
+      return res.status(400).json({ error: "URL is required" });
+    }
+
+    const { data } = await axios.get(url);
+    const dom = new JSDOM(data);
+    const document = dom.window.document;
+    const reader = new Readability(document);
+    const article = reader.parse();
+
+    res.status(200).json(article);
+  } catch (error) {
+    console.error(error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "An error occurred while processing the request" });
+    }
+  }
+});
 
 app.post("/tts", async (req, res) => {
   try {

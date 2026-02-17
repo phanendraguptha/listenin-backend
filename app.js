@@ -2,6 +2,7 @@ const express = require("express");
 const { EdgeTTS } = require("@andresaya/edge-tts");
 const fs = require("fs");
 const path = require("path");
+const SubMaker = require("./SubMaker");
 
 const app = express();
 const port = 3000;
@@ -9,13 +10,10 @@ const port = 3000;
 // Middleware to parse JSON bodies
 app.use(express.json());
 
-// Initialize EdgeTTS
-const tts = new EdgeTTS();
-
-// TTS route
 app.post("/tts", async (req, res) => {
   try {
     const { text } = req.body;
+    const tts = new EdgeTTS();
 
     if (!text) {
       return res.status(400).json({ error: "Text is required" });
@@ -25,35 +23,42 @@ app.post("/tts", async (req, res) => {
     const baseName = `audio_output_${Date.now()}`;
     const outputPath = path.join(__dirname, baseName);
     const finalPath = outputPath + ".mp3";
-    console.log("Audio output path: ", finalPath);
+    const srtPath = outputPath + ".srt";
 
-    // Synthesize speech and save it to a file
+    // Synthesize speech
     await tts.synthesize(text, "en-CA-LiamNeural");
     await tts.toFile(outputPath);
 
-    // Return the audio file to the frontend
-    res.sendFile(finalPath, (err) => {
-      // Cleanup the file regardless of success or failure
-      fs.unlink(finalPath, (unlinkErr) => {
-        if (unlinkErr) {
-          console.error("Error deleting file:", unlinkErr);
-        } else {
-          console.log("Audio file deleted successfully!");
-        }
-      });
+    // Generate SRT using SubMaker
+    const subMaker = new SubMaker();
+    const boundaries = tts.getWordBoundaries();
+    boundaries.forEach((msg) => subMaker.feed(msg));
 
-      if (err) {
-        if (!res.headersSent) {
-          res.status(500).json({ error: "Failed to send the audio file" });
-        }
-        console.error("Error sending file:", err);
-      } else {
-        console.log("Audio file sent successfully!");
-      }
+    const srtContent = subMaker.getSrt();
+    await fs.promises.writeFile(srtPath, srtContent);
+
+    // Read the audio file to send as base64
+    const audioBuffer = await fs.promises.readFile(finalPath);
+
+    // Return both audio and SRT to the frontend
+    res.json({
+      audio: audioBuffer.toString("base64"),
+      srt: srtContent,
+      format: "mp3",
+    });
+
+    // Clean up files after sending response
+    [finalPath, srtPath].forEach((file) => {
+      fs.unlink(file, (err) => {
+        if (err) console.error(`Error deleting ${file}:`, err);
+        else console.log(`Deleted ${file}`);
+      });
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "An error occurred while processing the request" });
+    if (!res.headersSent) {
+      res.status(500).json({ error: "An error occurred while processing the request" });
+    }
   }
 });
 

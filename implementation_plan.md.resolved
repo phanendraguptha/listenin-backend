@@ -1,0 +1,78 @@
+# Backend API Optimization Plan
+
+## Goal
+Reduce latency for `/generate-dom` and `/tts` endpoints and prevent main-thread blocking.
+
+## User Review Required
+> [!IMPORTANT]
+> The `/tts` endpoint optimization involves switching from file-based operations to in-memory operations. This should improve performance but will increase memory usage per request.
+> I will also introduce a `worker_threads` implementation for `/generate-dom` to offload CPU-intensive parsing.
+
+## Proposed Changes
+
+### Backend (`listenin-backend`)
+
+#### [MODIFY] [app.js](file:///home/brahmanya/listenin-backend/app.js)
+- **New `/stream` Endpoint**:
+    - **Goal**: Unified, single-request experience with zero waiting.
+    - **Method**: Server-Sent Events (SSE).
+    - **Flow**:
+        1.  **Request**: Client POSTs/GETs `/stream?url=...`
+        2.  **Step 1 (Text)**: Server offloads parsing to `worker`. Once done, immediately sends event: `event: article\ndata: { title, content }`
+        3.  **Step 2 (Audio)**: Server starts `EdgeTTS` stream. As chunks arrive:
+            - Send event: `event: audio\ndata: <base64_chunk>`
+            - Capture `WordBoundaries` for subtitles.
+        4.  **Step 3 (Subtitles)**: As boundaries arrive (or at the end), send: `event: srt\ndata: ...`
+
+### Flow Diagram
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server (Main Thread)
+    participant Worker (DOM)
+    participant EdgeTTS (Service)
+
+    Client->>Server (Main Thread): GET /stream?url=...
+    Server (Main Thread)->>Worker (DOM): { url }
+    activate Worker (DOM)
+    Worker (DOM)-->>Server (Main Thread): { title, content }
+    deactivate Worker (DOM)
+    Server (Main Thread)->>Client: SSE event: article { ... }
+
+    par Audio Generation
+        Server (Main Thread)->>EdgeTTS (Service): synthesizeStream(text)
+        activate EdgeTTS (Service)
+        loop Audio Chunks
+            EdgeTTS (Service)-->>Server (Main Thread): Audio Chunk (Buffer)
+            Server (Main Thread)->>Client: SSE event: audio <base64>
+        end
+        EdgeTTS (Service)-->>Server (Main Thread): Complete
+        deactivate EdgeTTS (Service)
+    and Subtitle Generation
+       Note over Server (Main Thread): Collect WordBoundaries
+       Server (Main Thread)->>Client: SSE event: srt (subtitles)
+    end
+```
+
+- **Legacy Support**: Keep `/generate-dom` and `/tts` but optimize them as planned (Worker + In-Memory) for backward compatibility if needed.
+
+#### [NEW] [dom-worker.js](file:///home/brahmanya/listenin-backend/dom-worker.js)
+- Handles HTML parsing to keep the main thread unblocked for streaming.
+
+#### [NEW] [dom-worker.js](file:///home/brahmanya/listenin-backend/dom-worker.js)
+- Create a worker script that handles:
+    - Receiving `{ url, htmlContent }` (or fetching URL inside worker if preferred, but `axios` is async so fetching in main is fine, parsing in worker is key).
+    - Actually, fetching in worker is also fine.
+    - Uses `JSDOM` and `Readability` to parse and return the article.
+
+## Verification Plan
+
+### Automated Tests
+- Create a test script `test-perf.js` to measure response times.
+    - Measure `/tts` response time (should be < 4s ideally, essentially strictly synthesis time).
+    - Measure `/generate-dom` correctness.
+
+### Manual Verification
+- Run the server: `node app.js`
+- trigger `test-perf.js` or `curl`.

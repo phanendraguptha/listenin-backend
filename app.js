@@ -1,4 +1,5 @@
 import express from "express";
+import cors from "cors";
 import { EdgeTTS } from "@andresaya/edge-tts";
 import { Worker } from "worker_threads";
 import SubMaker from "./SubMaker.js";
@@ -10,6 +11,7 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 const CACHE_MAX_ENTRIES = 100;
 const articleCache = new Map();
 
+app.use(cors());
 // Middleware to parse JSON bodies
 app.use(express.json({ limit: "5mb" }));
 

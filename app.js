@@ -17,7 +17,8 @@ app.use(
       if (
         !origin ||
         origin.endsWith(".vercel.app") ||
-        origin === "https://listenin.js.org"
+        origin === "https://listenin.js.org" ||
+	origin === "https://listenin.phanendraguptha.com"
       ) {
         callback(null, true);
       } else {
@@ -386,4 +387,4 @@ app.post("/stream", async (req, res) => {
 });
 
 // Start the server
-app.listen(port, () => console.log(`Server running on http://0.0.0.0:${port}`));
+app.listen(port, '0.0.0.0', () => console.log(`Server running on http://0.0.0.0:${port}`));

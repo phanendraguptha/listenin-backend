@@ -18,7 +18,7 @@ app.use(
         !origin ||
         origin.endsWith(".vercel.app") ||
         origin === "https://listenin.js.org" ||
-	origin === "https://listenin.phanendraguptha.com"
+        origin === "https://listenin.phanendraguptha.com"
       ) {
         callback(null, true);
       } else {
@@ -125,7 +125,7 @@ const parseArticleInWorker = (url) =>
       if (!settled) {
         settled = true;
       }
-      worker.terminate().catch(() => {});
+      worker.terminate().catch(() => { });
     };
 
     worker.on("message", (message) => {

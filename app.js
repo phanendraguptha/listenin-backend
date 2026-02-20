@@ -11,7 +11,21 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 const CACHE_MAX_ENTRIES = 100;
 const articleCache = new Map();
 
-app.use(cors());
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (
+        !origin ||
+        origin.endsWith(".vercel.app") ||
+        origin === "https://listenin.js.org"
+      ) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+  }),
+);
 // Middleware to parse JSON bodies
 app.use(express.json({ limit: "5mb" }));
 
@@ -372,5 +386,4 @@ app.post("/stream", async (req, res) => {
 });
 
 // Start the server
-app.listen(port, '0.0.0.0', () => console.log(`Server running on http://0.0.0.0:${port}`));
-
+app.listen(port, () => console.log(`Server running on http://0.0.0.0:${port}`));

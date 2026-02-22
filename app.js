@@ -1,5 +1,9 @@
 import express from "express";
 import cors from "cors";
+import crypto from "crypto";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { EdgeTTS } from "@andresaya/edge-tts";
 import { Worker } from "worker_threads";
 import SubMaker from "./SubMaker.js";
@@ -10,6 +14,11 @@ const port = 3000;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const CACHE_MAX_ENTRIES = 100;
 const articleCache = new Map();
+
+// Temp directory for audio files
+const AUDIO_TMP_DIR = path.join(os.tmpdir(), "listenin-audio");
+fs.mkdirSync(AUDIO_TMP_DIR, { recursive: true });
+const AUDIO_FILE_TTL_MS = 10 * 60 * 1000; // delete after 10 minutes
 
 app.use(
   cors({
@@ -125,7 +134,7 @@ const parseArticleInWorker = (url) =>
       if (!settled) {
         settled = true;
       }
-      worker.terminate().catch(() => { });
+      worker.terminate().catch(() => {});
     };
 
     worker.on("message", (message) => {
@@ -298,10 +307,10 @@ app.post("/stream", async (req, res) => {
       `[stream] Starting TTS: ${textContent.length} chars, ${textChunks.length} chunk(s)`,
     );
 
-    const chunkResults = [];
     let cumulativeOffset = 0;
+    const audioBuffers = [];
 
-    // Phase 1: Synthesize all chunks and collect audio/boundaries
+    // Interleaved: for each chunk, synthesize → send SRT → accumulate audio
     for (let i = 0; i < textChunks.length; i++) {
       if (clientClosed) break;
 
@@ -313,23 +322,6 @@ app.post("/stream", async (req, res) => {
       const tts = new EdgeTTS();
       try {
         await tts.synthesize(chunkText, "en-CA-LiamNeural");
-        const audioBuffer = tts.toBuffer();
-        const boundaries = tts.getWordBoundaries();
-
-        const adjustedBoundaries = boundaries.map((b) => ({
-          ...b,
-          offset: b.offset + cumulativeOffset,
-        }));
-
-        chunkResults.push({
-          audioBuffer,
-          boundaries: adjustedBoundaries,
-        });
-
-        if (boundaries.length > 0) {
-          const last = boundaries[boundaries.length - 1];
-          cumulativeOffset = last.offset + last.duration + cumulativeOffset;
-        }
       } catch (ttsError) {
         console.error(`[stream] TTS error on chunk ${i + 1}:`, ttsError.message);
         sendSseEvent(res, "error", {
@@ -338,6 +330,27 @@ app.post("/stream", async (req, res) => {
         res.end();
         return;
       }
+
+      const audioBuffer = tts.toBuffer();
+      const boundaries = tts.getWordBoundaries();
+      audioBuffers.push(audioBuffer);
+
+      // Adjust boundary offsets for cumulative timing
+      const adjustedBoundaries = boundaries.map((b) => ({
+        ...b,
+        offset: b.offset + cumulativeOffset,
+      }));
+
+      if (boundaries.length > 0) {
+        const last = boundaries[boundaries.length - 1];
+        cumulativeOffset = last.offset + last.duration + cumulativeOffset;
+      }
+
+      // Send this chunk's SRT immediately
+      const subMaker = new SubMaker();
+      adjustedBoundaries.forEach((msg) => subMaker.feed(msg));
+      const srtContent = subMaker.getSrt();
+      sendSseEvent(res, "srt", { srt: srtContent });
     }
 
     if (clientClosed) {
@@ -345,35 +358,23 @@ app.post("/stream", async (req, res) => {
       return;
     }
 
-    // Phase 2: Send SRT
-    const subMaker = new SubMaker();
-    for (const result of chunkResults) {
-      result.boundaries.forEach((msg) => subMaker.feed(msg));
-    }
-    const srtContent = subMaker.getSrt();
-    sendSseEvent(res, "srt", { srt: srtContent });
+    // Write audio to temp file and send URL to client
+    const audioId = crypto.randomUUID();
+    const fullAudioBuffer = Buffer.concat(audioBuffers);
+    const audioFilePath = path.join(AUDIO_TMP_DIR, `${audioId}.mp3`);
+    fs.writeFileSync(audioFilePath, fullAudioBuffer);
 
-    // Phase 3: Stream Audio
-    for (let i = 0; i < chunkResults.length; i++) {
-      if (clientClosed) break;
+    // Schedule file cleanup — no polling, just a one-shot timer
+    setTimeout(() => {
+      fs.unlink(audioFilePath, () => {});
+    }, AUDIO_FILE_TTL_MS);
 
-      const { audioBuffer } = chunkResults[i];
-      console.log(`[stream] Streaming audio for chunk ${i + 1}/${chunkResults.length}`);
+    console.log(
+      `[stream] Audio saved: ${audioFilePath} (${fullAudioBuffer.length} bytes)`,
+    );
 
-      const SEGMENT_SIZE = 16 * 1024;
-      for (let offset = 0; offset < audioBuffer.length; offset += SEGMENT_SIZE) {
-        if (clientClosed) break;
-        const segment = audioBuffer.subarray(
-          offset,
-          Math.min(offset + SEGMENT_SIZE, audioBuffer.length),
-        );
-        sendSseEvent(res, "audio", segment.toString("base64"));
-      }
-    }
-
-    if (!clientClosed) {
-      sendSseEvent(res, "done", {});
-    }
+    sendSseEvent(res, "audio_url", { audioId });
+    sendSseEvent(res, "done", {});
     res.end();
   } catch (error) {
     console.error(error);
@@ -383,6 +384,48 @@ app.post("/stream", async (req, res) => {
       });
       res.end();
     }
+  }
+});
+
+// Serve audio files with HTTP Range support using fs.createReadStream
+app.get("/audio/:id", (req, res) => {
+  const { id } = req.params;
+  const filePath = path.join(AUDIO_TMP_DIR, `${id}.mp3`);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Audio not found or expired" });
+  }
+
+  const { size: audioSize } = fs.statSync(filePath);
+  const range = req.headers.range;
+
+  if (range) {
+    // Range request — stream a chunk using createReadStream
+    const CHUNK_SIZE = 512 * 1024; // 512KB chunks
+    const parts = range.replace(/bytes=/, "").split("-");
+    const start = parseInt(parts[0], 10);
+    const end = Math.min(start + CHUNK_SIZE, audioSize - 1);
+    const contentLength = end - start + 1;
+
+    res.writeHead(206, {
+      "Content-Range": `bytes ${start}-${end}/${audioSize}`,
+      "Accept-Ranges": "bytes",
+      "Content-Length": contentLength,
+      "Content-Type": "audio/mpeg",
+    });
+
+    const stream = fs.createReadStream(filePath, { start, end });
+    stream.pipe(res);
+  } else {
+    // No range — stream the full file
+    res.writeHead(200, {
+      "Content-Length": audioSize,
+      "Content-Type": "audio/mpeg",
+      "Accept-Ranges": "bytes",
+    });
+
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
   }
 });
 
